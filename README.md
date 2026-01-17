@@ -34,12 +34,9 @@ Better to see images below.
 
 <img src="images/orp_monitor_housing2.jpg" width="256"/>
 
-<img src="images/IMG_5024.jpg" width="256"/>
-<img src="images/IMG_5026.jpg" width="256"/>
-<img src="images/IMG_5025.jpg" width="256"/>
-<img src="images/IMG_5027.jpg" width="256"/>
-<img src="images/IMG_5028.jpg" width="256"/>
-<img src="images/IMG_5030.jpg" width="256"/>
+<img src="images/IMG_5024.jpg" width="256"/><img src="images/IMG_5026.jpg" width="256"/>
+<img src="images/IMG_5025.jpg" width="256"/><img src="images/IMG_5027.jpg" width="256"/>
+<img src="images/IMG_5028.jpg" width="256"/><img src="images/IMG_5030.jpg" width="256"/>
 
 
 # How To Configure WiFi
