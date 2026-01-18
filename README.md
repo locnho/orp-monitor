@@ -36,7 +36,7 @@ Better to see images below.
 <img src="images/IMG_5024.jpg" width="256"/><img src="images/IMG_5026.jpg" width="256"/>
 <img src="images/IMG_5025.jpg" width="256"/><img src="images/IMG_5027.jpg" width="256"/>
 <img src="images/IMG_5028.jpg" width="256"/><img src="images/IMG_5030.jpg" width="256"/>
-
+<img src="images/IMG_5053.jpg" width="256"/><img src="images/IMG_5054.jpg" width="256"/>
 
 # How To Configure WiFi
 
@@ -55,7 +55,11 @@ After this, wait around 2 to 3 minutes on the mobile app. This will configure th
 
 To configure system setting such as MQTT broker, ORP calibrate value, etc, open a browser and enter the IP address as ``http://<ip address>``.
 
-You should see the below image. Configure the host name, MQTT Server name, user, password, port, and topic. If your ORP calibration solution isn't 225 mV, change the ORP calibration value. Then click on the ``Submit`` button.
+You should see the below image. Configure the host name, MQTT Server name, user, password, port, and topic.
+
+If you want to disable reporting MQTT ORP value when the pump is not running, leave ``MQTT Pump Topic`` as is. If you want to ignore pump status and always report ORP reading to MQTT, set to blank.
+
+If your ORP calibration solution isn't 225 mV, change the ORP calibration value. Then click on the ``Submit`` button.
 
 <img src="images/orp_monitor_config.png" width="256"/>
 
@@ -70,7 +74,9 @@ To calibrat ORP probe, perform these steps:
 
 <img src="images/IMG_5048.jpg" width="256"/>
 
-The "CAL" indicates that the ORP has been calibrated. If there is an X over it, then it is not calibrated.
+The "C" indicates that the ORP has been calibrated. If there is an X over it, then it is not calibrated.
+
+The "P" indicates that the pump is running. If there is an X over it, then the pump is not running. This is based on MQTT message from MQTT pump topic. If the MQTT pump topic is blank, then it is assumed that the pump is always running.
 
 The upper right WiFi bar indicate the WiFi RSSI strength.
 
@@ -80,3 +86,6 @@ The IP address on the screen shows its IP address.
 
 The screen will turn off after some idle time. Press the button to show the screen.
 
+Here is an image as reported via AquaLinkD.
+
+<img src="images/orp_aqualinkd.png" width="256"/>

@@ -18,7 +18,7 @@
 
 #define DBG_SUPPORT 1     /* Print general debug information */
 //#define DBG_STATUS 1    /* Print equivalent of menu on serail port */
-//#define DBG_MQTT 1      /* Print MQTT messages */
+//#define DBG_MQTT 1        /* Print MQTT messages */
 #define DBG_ORP 1         /* Print ORP message */
 
 #if defined(DBG_SUPPORT)
@@ -124,16 +124,18 @@ typedef struct {
   char mqtt_topic[64];
   char mqtt_user[64];
   char mqtt_password[64];
+  char mqtt_pump_topic[64];
   char hostname[64];
   int mqtt_port;
   int orp_cal_mV;
 } Setting_Info;
 
 #define SIGNATURE1    0x57494649
-#define SIGNATURE2    0x00000002
+#define SIGNATURE2    0x00000003
 #define MQTT_BROKER_DEFAULT   ""
-#define MQTT_SUGGEST_BROKER_DEFAULT   "aqualink.local"
-#define MQTT_TOPIC_DEFAULT    "aqualinkd/CHEM/ORP/set"
+#define MQTT_SUGGEST_BROKER_DEFAULT "aqualink.local"
+#define MQTT_TOPIC_DEFAULT          "aqualinkd/CHEM/ORP/set"
+#define MQTT_TOPIC_PUMP_DEFAULT     "aqualinkd/Filter_Pump"
 #define MQTT_USER_DEFAULT     "pi"
 #define MQTT_PORT_DEFAULT     1883
 #define HOSTNAME_DEFAULT      "ORP"
@@ -161,6 +163,7 @@ unsigned long setting_info_ts = 0;
 
 unsigned long mqtt_connect_ts = 0;
 int mqtt_connect_first_time = 1;
+int mqtt_pump_state = -1;
 
 //
 // Serial Setup
@@ -264,6 +267,20 @@ void oled_wifi_update(int show_ip = 1)
 #if defined(WIFI_SUPPORT)
   if (!oled_detected)
     return;
+
+  u8g2.setFont(u8g2_font_helvB08_tf);
+  int offset = 21;
+  u8g2.drawStr(offset, 12, "P");
+  u8g2.drawCircle(offset + 2, 8, 7);
+  if (!mqtt_is_pump_on()) {
+     u8g2.drawLine(offset - 3, 2, offset + 7, 14);
+     u8g2.drawLine(offset - 2, 2, offset + 8, 14);
+     u8g2.drawLine(offset - 4, 2, offset + 6, 14);
+     u8g2.drawLine(offset - 3, 14, offset + 7, 2);
+     u8g2.drawLine(offset - 2, 14, offset + 8, 2);
+     u8g2.drawLine(offset - 4, 14, offset + 6, 2);
+  }
+
   if (!is_wifi_connected())
     return;
 
@@ -312,8 +329,7 @@ void oled_wifi_update(int show_ip = 1)
     u8g2.drawStr(0, 54, ip_string.c_str());
   }
 
-  if (mqtt_is_subscribed()) {
-     
+  if (mqtt_is_subscribed()) {  
     u8g2.setFont(u8g2_font_courR08_tf);
     u8g2.drawStr(u8g2.getDisplayWidth() - u8g2.getStrWidth("MQTT"), 15, "MQTT");
   }
@@ -322,6 +338,8 @@ void oled_wifi_update(int show_ip = 1)
 
 bool is_orp_reading_expired()
 {
+  if (ord_ts == 0)
+    return 1;
   if ((millis() - ord_ts) > 3000)
     return 1;
   return 0;
@@ -330,12 +348,16 @@ bool is_orp_reading_expired()
 void oled_orp_update()
 {
   u8g2.setFont(u8g2_font_helvB08_tf);
-  u8g2.drawStr(0, 12, "CAL");
+  u8g2.drawStr(4, 12, "C");
+  u8g2.drawCircle(7, 8, 7);
   if (orp_caled != 1) {
-    u8g2.drawLine(2, 0, 18, 15);
-    u8g2.drawLine(3, 0, 19, 15);
-    u8g2.drawLine(2, 15, 18, 0);
-    u8g2.drawLine(3, 15, 19, 0);
+    int offset = 4;
+    u8g2.drawLine(offset - 3, 2, offset + 7, 14);
+    u8g2.drawLine(offset - 2, 2, offset + 8, 14);
+    u8g2.drawLine(offset - 4, 2, offset + 6, 14);
+    u8g2.drawLine(offset - 3, 14, offset + 7, 2);
+    u8g2.drawLine(offset - 2, 14, offset + 8, 2);
+    u8g2.drawLine(offset - 4, 14, offset + 6, 2);
   }
 }
 
@@ -373,6 +395,12 @@ void oled_title_update_print()
 {
   if (orp_caled == 1) {
     STATUS_PRINTLN("CAL");
+  }
+
+  if (mqtt_is_pump_on()) {
+    STATUS_PRINTLN("PUMP ON");
+  } else {
+    STATUS_PRINTLN("PUMP OFF");
   }
 
 #if defined(WIFI_SUPPORT)
@@ -736,6 +764,7 @@ void wifi_setting_clear()
   strcpy(setting_info.mqtt_topic, MQTT_TOPIC_DEFAULT);
   strcpy(setting_info.mqtt_user, MQTT_USER_DEFAULT);
   strcpy(setting_info.hostname, HOSTNAME_DEFAULT);
+  strcpy(setting_info.mqtt_pump_topic, MQTT_TOPIC_PUMP_DEFAULT);
   setting_info.mqtt_port = MQTT_PORT_DEFAULT;
   setting_info.orp_cal_mV = ORP_CAL_MV_DEFAULT;
   setting_info.signature1 = SIGNATURE1;
@@ -760,6 +789,8 @@ void wifi_setting_init()
   strcpy(setting_info.mqtt_broker, str.c_str());
   str = prefs.getString("MQTTTOPIC", MQTT_TOPIC_DEFAULT);
   strcpy(setting_info.mqtt_topic, str.c_str());
+  str = prefs.getString("MQTTPUMPTOPIC", MQTT_TOPIC_PUMP_DEFAULT);
+  strcpy(setting_info.mqtt_pump_topic, str.c_str());
   str = prefs.getString("MQTTUSER", MQTT_USER_DEFAULT);
   strcpy(setting_info.mqtt_user, str.c_str());
   str = prefs.getString("MQTTPW", "");
@@ -779,6 +810,7 @@ void wifi_setting_init()
   // DBG_PRINTLN(setting_info.mqtt_password);
   DBG_PRINTLN(setting_info.mqtt_port);
   DBG_PRINTLN(setting_info.mqtt_topic);
+  DBG_PRINTLN(setting_info.mqtt_pump_topic);
   DBG_PRINTLN(setting_info.orp_cal_mV);
 }
 
@@ -791,6 +823,7 @@ void wifi_setting_save()
   prefs.putString("PW", setting_info.password);
   prefs.putString("MQTTBROKER", setting_info.mqtt_broker);
   prefs.putString("MQTTTOPIC", setting_info.mqtt_topic);
+  prefs.putString("MQTTPUMPTOPIC", setting_info.mqtt_pump_topic);
   prefs.putString("MQTTUSER", setting_info.mqtt_user);
   prefs.putString("MQTTPW", setting_info.mqtt_password);
   prefs.putInt("MQTTPORT", setting_info.mqtt_port);
@@ -851,8 +884,12 @@ void orp_loop()
       orp_reading++;
     }
 #if defined(WIFI_SUPPORT)
+    // Publish only if pump is ON.
     if ((millis() - mqtt_orp_publish_ts) >= ORP_PUBLISH_TIMEMS) {
-      mqtt_publish(orp_reading);
+      if (mqtt_is_pump_on())
+        mqtt_publish(orp_reading);
+      else
+        mqtt_publish(0.0);
       mqtt_orp_publish_ts = millis();
     }
 #endif
@@ -918,7 +955,10 @@ void orp_loop()
     oled_screen_refresh = 1;
 #if defined(WIFI_SUPPORT)
     if ((millis() - mqtt_orp_publish_ts) >= ORP_PUBLISH_TIMEMS) {
-      mqtt_publish(orp_reading);
+      if (mqtt_is_pump_on())
+        mqtt_publish(orp_reading);
+      else
+        mqtt_publish(0.0);
       mqtt_orp_publish_ts = millis();
     }
 #endif
@@ -1128,6 +1168,11 @@ const char* htmlMqttTopic = R"rawliteral(
             <input type="text" id="topic" name="topic" value="%s" required>
 )rawliteral";
 
+const char* htmlMqttPumpTopic = R"rawliteral(
+            <label for="pumptopic">MQTT Pump Topic:</label>
+            <input type="text" id="pumptopic" name="pumptopic" value="%s" required>
+)rawliteral";
+
 const char* htmlOrpCalmV = R"rawliteral(
             <label for="orpcal">ORP Calibration mV:</label>
             <input type="text" id="orpcal" name="orpcal" value="%d" required>
@@ -1169,6 +1214,9 @@ void web_handle_root()
 
   snprintf(temp, sizeof(temp), htmlMqttTopic, setting_info.mqtt_topic);
   server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlMqttPumpTopic, setting_info.mqtt_pump_topic);
+  server.sendContent(temp);  
 
   snprintf(temp, sizeof(temp), htmlOrpCalmV, setting_info.orp_cal_mV);
   server.sendContent(temp);
@@ -1215,6 +1263,12 @@ void web_handle_mqtt_submit()
     strncpy(setting_info.mqtt_topic, server.arg("topic").c_str(), 64);
     setting_info.mqtt_topic[63] = 0;
   }
+  if (server.hasArg("pumptopic")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("pumptopic");
+    strncpy(setting_info.mqtt_pump_topic, server.arg("pumptopic").c_str(), 64);
+    setting_info.mqtt_pump_topic[63] = 0;
+  }
   if (server.hasArg("orpcal")) {
     receivedMessage += " ";
     receivedMessage += server.arg("orpcal");
@@ -1243,6 +1297,27 @@ void web_setup()
 
 void mqtt_msg_recv(int messageSize)
 {
+  unsigned char msg[80];
+  char topic[128];
+
+  strncpy(topic, mqtt_client.messageTopic().c_str(), sizeof(topic));
+  topic[sizeof(topic)-1] = '\0';
+  MQTT_PRINT("MQTT: \"");
+  MQTT_PRINT(topic);
+  MQTT_PRINT("\"");
+  int total = mqtt_client.read(msg, sizeof(msg) - 1);
+  msg[total] = '\0';
+  MQTT_PRINT(" \"");
+  MQTT_PRINT((char *) msg);
+  MQTT_PRINTLN("\"");
+  if (strlen(setting_info.mqtt_pump_topic) > 0 &&
+      strcasecmp(topic, setting_info.mqtt_pump_topic) == 0) {
+    if (strcmp((char *) msg, "0") == 0) {
+      mqtt_pump_state = 0;
+    } else if (strcmp((char *) msg, "1") == 0) {
+      mqtt_pump_state = 1;
+    }
+  }
 }
 
 void mqtt_setup()
@@ -1322,12 +1397,22 @@ int mqtt_connect()
       return 1;
     }
   } else if (!mqtt_subscribed) {
-    //mqtt_client.subscribe(setting_info.mqtt_topic);
+    if (strlen(setting_info.mqtt_pump_topic) > 0) {
+      mqtt_client.subscribe(setting_info.mqtt_pump_topic);
+    } else {
+      // If no pump topic, assume pump is on.
+      mqtt_pump_state = 1;
+    }
     set_status_msg("MQTT subscribed");
     oled_screen_refresh = 1;
     oled_update_mqtt_connect(1);
     mqtt_subscribed = 1;
-    mqtt_publish(orp_reading);
+    if (!is_orp_reading_expired()) {
+      if (mqtt_is_pump_on())
+        mqtt_publish(orp_reading);
+      else
+        mqtt_publish(0.0);
+    }
     return 1;
   } else {
     return 1;
@@ -1357,6 +1442,12 @@ int mqtt_is_subscribed()
   return 0;
 }
 
+int mqtt_is_pump_on()
+{
+  if (mqtt_pump_state == 1)
+    return 1;
+  return 0;
+}
 #else
 int wifi_loop() { return 1; }
 void mqtt_loop() {}
@@ -1364,6 +1455,7 @@ void web_loop() {}
 void wifi_rssi_update() {}
 int mqtt_is_subscribed() { return 0; }
 int mqtt_connect() { return 1; }
+int mqtt_is_pump_on() { return 1; }
 #endif /* WIFI_SUPPORT */
 
 void setup()
