@@ -57,7 +57,7 @@ To configure system setting such as MQTT broker, ORP calibrate value, etc, open 
 
 You should see the below image. Configure the host name, MQTT Server name, user, password, port, and topic.
 
-If you want to disable reporting MQTT ORP value when the pump is not running, leave ``MQTT Pump Topic`` as is. If you want to ignore pump status and always report ORP reading to MQTT, set to blank.
+If the pump is not running, ORP value of 0.0 is reported using the ``MQTT Pump Topic``. If you want to always report ORP reading even if pump is not running, set to blank.
 
 If your ORP calibration solution isn't 225 mV, change the ORP calibration value. Then click on the ``Submit`` button.
 
@@ -65,7 +65,7 @@ If your ORP calibration solution isn't 225 mV, change the ORP calibration value.
 
 # How To Calibrate ORP Probe
 
-To calibrat ORP probe, perform these steps:
+To calibrate ORP probe, perform these steps:
 
   1. Push the button
   2. Select "CAL ORP" and push the knob to start ORP calibration
