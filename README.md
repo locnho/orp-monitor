@@ -20,14 +20,14 @@ After you have printed the mounting housing (from folder models), perform the fo
 
   1. Attach 35MM DIN rail bracket to base plate
   2. Attach some on 6 holes nylon spacer (3mm or so)
-  3. Attach the Atlas EZO Carrier Board with some nylon spacer. Did measure the spacer height.
+  3. Attach the Atlas EZO Carrier Board with some nylon spacer. Did not measured the spacer height.
   4. Attach the Atlas ORP Circuit Board
-  5. Make a custom board to house the ESP32C6 with three JST connectors. Then drill hole using the 3D printed template. 3 pins, 4 pins and 5 pins. This is to connect the rotary, LCD, and Atlas RS232 to ESP32C6 board. All you need is Vcc, GND, Rx, Tx, I2C, and some digital pin. For pin, see the Ardiuno source code. Attach the external WiFi antenna. See the image below. This is the green board.
+  5. Make a custom board to house the ESP32C6 with three JST connectors. Then drill holes using the 3D printed template. JST connectors are 3 pins, 4 pins and 5 pins. For the ESP32C6, it is attached to 2.54mm Female Pin Header Socket Connector. This allows connecting the rotary, LCD, and Atlas RS232 to the ESP32C6 board. All you need is Vcc, GND, Rx, Tx, I2C, and some digital pin. For pin, see the Ardiuno source code. Attach the external WiFi antenna. See the image below. This is the green board.
   6. Attach some nylon spacer (did not measuer the spacer height)
   7. Slide the side cover in. The total height should be equal to the cover height.
   8. Create connector wire and attach them
   9. Attach the LCD to the top board with some nylone screws (2mm screw)
-  10. Screw in some nylon screw
+  10. Screw in some nylon screws
 
 Better to see images below.
 
