@@ -114,6 +114,7 @@ enum OP_STATE op_state = OP_NORMAL;
 #if defined(WIFI_SUPPORT)
 #include "sdkconfig.h"
 #include "WiFi.h"
+#include <ArduinoMDNS.h>
 
 typedef struct {
   uint32_t signature1;
@@ -125,9 +126,18 @@ typedef struct {
   char mqtt_user[64];
   char mqtt_password[64];
   char mqtt_pump_topic[64];
+  char mqtt_swg_topic[64];
   char hostname[64];
   int mqtt_port;
   int orp_cal_mV;
+  int swg_enable;
+  int swg_orp_target;
+  int swg_orp_hysteresis;
+  int swg_orp_std_dev;
+  int swg_orp_interval;
+  int swg_orp_guard;
+  int swg_orp_pct[5];
+  int swg_data_sample_time_sec;
 } Setting_Info;
 
 #define SIGNATURE1    0x57494649
@@ -136,11 +146,15 @@ typedef struct {
 #define MQTT_SUGGEST_BROKER_DEFAULT "aqualink.local"
 #define MQTT_TOPIC_DEFAULT          "aqualinkd/CHEM/ORP/set"
 #define MQTT_TOPIC_PUMP_DEFAULT     "aqualinkd/Filter_Pump"
+#define MQTT_TOPIC_SWG_DEFAULT      "aqualinkd/SWG/Percent"
 #define MQTT_USER_DEFAULT     "pi"
 #define MQTT_PORT_DEFAULT     1883
 #define HOSTNAME_DEFAULT      "ORP"
 #define ORP_CAL_MV_DEFAULT    225
+#define SWG_ENABLE_DEFAULT    1
 Setting_Info setting_info;
+
+char mqtt_pump_topic_match[64];
 
 long rssi = 0;
 enum WIFI_STATE {
@@ -159,11 +173,19 @@ bool is_wifi_connected();
 int mqtt_is_subscribed();
 
 unsigned long setting_info_ts = 0;
+
+bool mdns_ready = 0;
+unsigned long mdns_ready_ts = 0;
+WiFiUDP udp;
+MDNS mdns(udp);
+
 #endif /* WIFI_SUPPORT */
 
 unsigned long mqtt_connect_ts = 0;
 int mqtt_connect_first_time = 1;
 int mqtt_pump_state = -1;
+int mqtt_swg_pct = -1;
+int mqtt_swg_pct_set = -1;
 
 //
 // Serial Setup
@@ -424,26 +446,36 @@ void oled_status_alive_update_print()
 
 void oled_update_normal(bool now)
 {
-  char msg[40];
+  char msg1[30];
+  char msg2[10];
 
   if (now == 0 && (millis() - oled_refresh_ts) <= 1000)
     return;
   if (oled_idle) {
     return;
   }
-  if (!oled_screen_refresh) {
-    return;
-  }
+  // if (!oled_screen_refresh) {
+  //   return;
+  // }
 
   oled_screen_refresh = 0;
   oled_refresh_ts = millis();
 
   oled_title_update_print();
-  if (is_orp_reading_expired())
-    sprintf(msg, "----mV");
+  int swg_pct;
+  if (mqtt_swg_pct < 0)
+    swg_pct = 0;
   else
-    sprintf(msg, "%0.1fmV", orp_reading);
-  STATUS_PRINTLN(msg);
+    swg_pct = mqtt_swg_pct;
+  if (is_orp_reading_expired()) {
+    sprintf(msg1, "----");
+    sprintf(msg2, "----   %d%%", swg_pct);
+  } else {
+    sprintf(msg1, "%0.1f", orp_reading);
+    sprintf(msg2, "%0.1f   %d%%", orp_reading, swg_pct);
+  }
+  STATUS_PRINTLN(msg1);
+  STATUS_PRINTLN(msg2);
   oled_status_alive_update_print();
 
   if (!oled_detected)
@@ -453,9 +485,18 @@ void oled_update_normal(bool now)
   oled_title_update();
   oled_status_alive_update();
 
-  u8g2.setFont(u8g2_font_ncenB18_tf);
-  int x = (u8g2.getDisplayWidth()-10 - u8g2.getStrWidth(msg)) / 2;
-  u8g2.drawButtonUTF8(5 + x, 40, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg);
+  //u8g2.setFont(u8g2_font_ncenB18_tf);
+  u8g2.setFont(u8g2_font_crox5t_tf);
+  int x = (u8g2.getDisplayWidth()-10 - u8g2.getStrWidth(msg2)) / 2;
+  if (setting_info.swg_enable)
+    u8g2.drawButtonUTF8(5 + x, 40, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg2);
+  else
+    u8g2.drawButtonUTF8(5 + x, 40, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg1);
+  int x2 = u8g2.getStrWidth(msg1);
+
+  u8g2.setFont(u8g2_font_helvR08_tf);
+  u8g2.drawStr(5 + x + x2 + 2, 30, "m");
+  u8g2.drawStr(5 + x + x2 + 2, 40, "V");
 
   u8g2.sendBuffer();
 }
@@ -744,6 +785,49 @@ void button_click(Button2& btn)
   }
 }
 
+/////////////////
+// SWG Control
+/////////////////
+void swg_set(int percent)
+{
+  ORP_PRINT("Set SWG ");
+  ORP_PRINTLN(percent);
+
+  if (mqtt_swg_pct_set != percent) {
+    mqtt_swg_publish(percent);
+    mqtt_swg_pct_set = percent;
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Data Samples Statistic
+///////////////////////////////////////////////////////////////////////////////
+#include "swganalyzer.h"
+unsigned long orp_swg_ctl_chk_ts;
+SWGAnalyzer swg_anlyzer;
+
+void orp_data_setup()
+{
+  swg_anlyzer.setup(setting_info.swg_data_sample_time_sec, setting_info.swg_orp_std_dev, setting_info.swg_orp_target,
+                    setting_info.swg_orp_hysteresis, setting_info.swg_orp_interval, setting_info.swg_orp_guard,
+                    setting_info.swg_orp_pct);
+}
+
+void orp_swg_ctrl_loop()
+{
+  int swg_pct;
+
+  if ((millis() - orp_swg_ctl_chk_ts) <= 15000) {
+    return;
+  }
+
+  swg_pct = swg_anlyzer.get_swg_pct();
+  if (swg_pct >= 0) {
+    swg_set(swg_pct);
+  }
+  orp_swg_ctl_chk_ts = millis();
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // WiFi Function
 ///////////////////////////////////////////////////////////////////////////////
@@ -757,7 +841,7 @@ void button_click(Button2& btn)
   Preferences prefs;
 #endif
 
-void wifi_setting_clear()
+void system_setting_clear()
 {
   memset((void *) &setting_info, 0, sizeof(setting_info));
   strcpy(setting_info.mqtt_broker, MQTT_BROKER_DEFAULT);
@@ -769,15 +853,28 @@ void wifi_setting_clear()
   setting_info.orp_cal_mV = ORP_CAL_MV_DEFAULT;
   setting_info.signature1 = SIGNATURE1;
   setting_info.signature2 = SIGNATURE2;
+  setting_info.swg_orp_target = SWG_ORP_DEFAULT;
+  setting_info.swg_orp_hysteresis = SWG_ORP_HYSTERESIS_DEFAULT;
+  setting_info.swg_orp_std_dev = SWG_ORP_STD_DEV_DEFAULT;
+  setting_info.swg_orp_interval = SWG_ORP_INTERVAL_DEFAULT;
+  setting_info.swg_orp_guard = SWG_ORP_GUARD_DEFAULT;
+  setting_info.swg_data_sample_time_sec = SWG_DATA_SAMPLE_TIME_SEC_DEFAULT;
+  setting_info.swg_orp_pct[0] = SWG_ORP_PCT0_DEFAULT;
+  setting_info.swg_orp_pct[1] = SWG_ORP_PCT1_DEFAULT;
+  setting_info.swg_orp_pct[2] = SWG_ORP_PCT2_DEFAULT;
+  setting_info.swg_orp_pct[3] = SWG_ORP_PCT3_DEFAULT;
+  setting_info.swg_orp_pct[4] = SWG_ORP_PCT4_DEFAULT;
+  setting_info.swg_enable = SWG_ENABLE_DEFAULT;
+  strcpy(setting_info.mqtt_swg_topic, MQTT_TOPIC_SWG_DEFAULT);
 }
 
-void wifi_setting_init()
+void system_setting_init()
 {
 #if defined(ARDUINO_SEEED_XIAO_M0)
   setting_info = setting_info_storage.read();
   if (setting_info.signature1 != SIGNATURE1 &&
       setting_info.signature2 != SIGNATURE2) {
-    wifi_setting_clear();
+    system_setting_clear();
   }
 #else
   prefs.begin("WIFI-INFO", false);
@@ -791,6 +888,8 @@ void wifi_setting_init()
   strcpy(setting_info.mqtt_topic, str.c_str());
   str = prefs.getString("MQTTPUMPTOPIC", MQTT_TOPIC_PUMP_DEFAULT);
   strcpy(setting_info.mqtt_pump_topic, str.c_str());
+  str = prefs.getString("MQTTSWGTOPIC", MQTT_TOPIC_SWG_DEFAULT);
+  strcpy(setting_info.mqtt_swg_topic, str.c_str());
   str = prefs.getString("MQTTUSER", MQTT_USER_DEFAULT);
   strcpy(setting_info.mqtt_user, str.c_str());
   str = prefs.getString("MQTTPW", "");
@@ -799,6 +898,19 @@ void wifi_setting_init()
   strcpy(setting_info.hostname, str.c_str());
   setting_info.mqtt_port = prefs.getInt("MQTTPORT", MQTT_PORT_DEFAULT);
   setting_info.orp_cal_mV = prefs.getInt("ORPCALMV", ORP_CAL_MV_DEFAULT);
+
+  setting_info.swg_enable = prefs.getInt("SWGENABLE", SWG_ENABLE_DEFAULT);
+  setting_info.swg_orp_target = prefs.getInt("SWGORPTARGET", SWG_ORP_DEFAULT);
+  setting_info.swg_orp_std_dev = prefs.getInt("SWGORSTDEV", SWG_ORP_STD_DEV_DEFAULT);
+  setting_info.swg_orp_hysteresis = prefs.getInt("SWGORPHYST", SWG_ORP_HYSTERESIS_DEFAULT);
+  setting_info.swg_orp_interval = prefs.getInt("SWGORPINTERVAL", SWG_ORP_INTERVAL_DEFAULT);
+  setting_info.swg_orp_guard = prefs.getInt("SWGORPGUARD", SWG_ORP_GUARD_DEFAULT);
+  setting_info.swg_orp_pct[0] = prefs.getInt("SWGORPPCT0", SWG_ORP_PCT0_DEFAULT);
+  setting_info.swg_orp_pct[1] = prefs.getInt("SWGORPPCT1", SWG_ORP_PCT1_DEFAULT);
+  setting_info.swg_orp_pct[2] = prefs.getInt("SWGORPPCT2", SWG_ORP_PCT2_DEFAULT);
+  setting_info.swg_orp_pct[3] = prefs.getInt("SWGORPPCT3", SWG_ORP_PCT3_DEFAULT);
+  setting_info.swg_orp_pct[4] = prefs.getInt("SWGORPPCT4", SWG_ORP_PCT4_DEFAULT);
+  setting_info.swg_data_sample_time_sec = prefs.getInt("SWGTIME", SWG_DATA_SAMPLE_TIME_SEC_DEFAULT);
 #endif
   DBG_PRINT("WiFi: ");
   DBG_PRINTLN(setting_info.ssid);
@@ -814,7 +926,7 @@ void wifi_setting_init()
   DBG_PRINTLN(setting_info.orp_cal_mV);
 }
 
-void wifi_setting_save()
+void system_setting_save()
 {
 #if defined(ARDUINO_SEEED_XIAO_M0)
   setting_info_storage.write(setting_info);
@@ -824,12 +936,41 @@ void wifi_setting_save()
   prefs.putString("MQTTBROKER", setting_info.mqtt_broker);
   prefs.putString("MQTTTOPIC", setting_info.mqtt_topic);
   prefs.putString("MQTTPUMPTOPIC", setting_info.mqtt_pump_topic);
+  prefs.putString("MQTTSWGTOPIC", setting_info.mqtt_swg_topic);
   prefs.putString("MQTTUSER", setting_info.mqtt_user);
   prefs.putString("MQTTPW", setting_info.mqtt_password);
   prefs.putInt("MQTTPORT", setting_info.mqtt_port);
   prefs.putString("HOSTNAME", setting_info.hostname);
   prefs.putInt("ORPCALMV", setting_info.orp_cal_mV);
+
+  prefs.putInt("SWGENABLE", setting_info.swg_enable);
+  prefs.putInt("SWGORPTARGET", setting_info.swg_orp_target);
+  prefs.putInt("SWGORSTDEV", setting_info.swg_orp_std_dev);
+  prefs.putInt("SWGORPHYST", setting_info.swg_orp_hysteresis);
+  prefs.putInt("SWGORPINTERVAL", setting_info.swg_orp_interval);
+  prefs.putInt("SWGORPGUARD", setting_info.swg_orp_guard);
+  prefs.putInt("SWGORPPCT0", setting_info.swg_orp_pct[0]);
+  prefs.putInt("SWGORPPCT1", setting_info.swg_orp_pct[1]);
+  prefs.putInt("SWGORPPCT2", setting_info.swg_orp_pct[2]);
+  prefs.putInt("SWGORPPCT3", setting_info.swg_orp_pct[3]);
+  prefs.putInt("SWGORPPCT4", setting_info.swg_orp_pct[4]);
+  prefs.putInt("SWGTIME", setting_info.swg_data_sample_time_sec);
 #endif
+}
+
+void system_setting_update()
+{
+  int len = strlen(setting_info.mqtt_pump_topic);
+
+  if (len > 0) {
+    strcpy(mqtt_pump_topic_match, setting_info.mqtt_pump_topic);
+    if (mqtt_pump_topic_match[len-1] == '#' &&
+        mqtt_pump_topic_match[len-2] == '/') {
+      mqtt_pump_topic_match[len-2] = '\0';
+    }
+  } else {
+    mqtt_pump_topic_match[0] = '\0';
+  }
 }
 
 bool is_wifi_connected()
@@ -858,11 +999,19 @@ void wifi_init()
 
 void wifi_setup()
 {
-  wifi_setting_init();
+  system_setting_init();
+  system_setting_update();
   wifi_init();
 }
+
+void wifi_resetup()
+{
+  WiFi.begin(setting_info.ssid, setting_info.password);
+}
+
 #else
 void wifi_setup() { }
+void wifi_resetup() { }
 bool is_wifi_connected() { return 0; }
 #endif /* WIFI_SUPPORT */
 
@@ -873,16 +1022,10 @@ void orp_loop()
 {
 //#define SIM_ORP_TEST  1
 #if defined(SIM_ORP_TEST)
-  if ((millis() - ord_ts) >= 3000) {
+  if ((millis() - ord_ts) >= 1000) {
     ord_ts = millis();
     orp_caled = 1;
-    if (orp_reading == 0.0) {
-      orp_reading = 225;
-    } else if (orp_reading >= 800) {
-      orp_reading = 225;
-    } else {
-      orp_reading++;
-    }
+    orp_reading = 620;
 #if defined(WIFI_SUPPORT)
     // Publish only if pump is ON.
     if ((millis() - mqtt_orp_publish_ts) >= ORP_PUBLISH_TIMEMS) {
@@ -893,6 +1036,7 @@ void orp_loop()
       mqtt_orp_publish_ts = millis();
     }
 #endif
+    swg_anlyzer.orp_add(orp_reading);
   }
 #else
 
@@ -962,6 +1106,7 @@ void orp_loop()
       mqtt_orp_publish_ts = millis();
     }
 #endif
+    swg_anlyzer.orp_add(orp_reading);
     break;
   }
 #endif
@@ -1013,8 +1158,9 @@ int wifi_loop()
 {
   switch (wifi_state) {
   case OP_WIFI_SMARTCONFIG:
-    wifi_setting_clear();
-    wifi_setting_save();
+    system_setting_clear();
+    system_setting_save();
+    system_setting_update();
     wifi_smartconfig();
     set_status_msg("SmartConfig started");
     wifi_state = OP_WIFI_WAIT_CONNECT;
@@ -1031,7 +1177,8 @@ int wifi_loop()
       String passwd_str = WiFi.psk();
       strcpy(setting_info.ssid, ssid_str.c_str());
       strcpy(setting_info.password, passwd_str.c_str());
-      wifi_setting_save();
+      system_setting_save();
+      system_setting_update();
       wifi_state = OP_WIFI_IDLE;
       return 1;
     }
@@ -1045,14 +1192,25 @@ int wifi_loop()
   return 0;
 }
 
-void wifi_rssi_update()
+unsigned long wifi_connect_chk_ts = 0;
+void wifi_link_chk_loop()
 {
-  long val = WiFi.RSSI();
+  if (is_wifi_connected()) {
+    long val = WiFi.RSSI();
 
-  if (val != rssi) {
-    oled_screen_refresh = 1;
-    rssi = val;
+    if (val != rssi) {
+      oled_screen_refresh = 1;
+      rssi = val;
+    }
+    return;
   }
+
+  if ((millis() - wifi_connect_chk_ts) <= 15*1000) {
+    return;
+  }
+  
+  wifi_resetup();
+  wifi_connect_chk_ts = millis();
 }
 
 /////////////////////////////////////////////////////////////////////
@@ -1065,7 +1223,8 @@ WiFiClient wifi_client;
 MqttClient mqtt_client(wifi_client);
 bool mqtt_subscribed = 0;
 
-WebServer server(80);
+#define HTTP_PORT   80
+WebServer server(HTTP_PORT);
 String receivedMessage = "";
 
 const char* htmlFormStart = R"rawliteral(
@@ -1094,7 +1253,18 @@ const char* htmlFormStart = R"rawliteral(
             display: flex;
             flex-direction: column;
         }
+        .form-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }        
         label {
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        label2 {
+            width: 200px;
             font-size: 14px;
             color: #333;
             margin-bottom: 5px;
@@ -1105,6 +1275,15 @@ const char* htmlFormStart = R"rawliteral(
             width: 100%;
             padding: 10px;
             margin-bottom: 20px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
+        input[type="side"] {
+            flex-grow: 1;
+            padding: 10px;
+            margin-bottom: 1px;
             border: 1px solid #ccc;
             border-radius: 4px;
             box-sizing: border-box;
@@ -1133,6 +1312,28 @@ const char* htmlFormStart = R"rawliteral(
     </style>
 </head>
 <body>
+    <script>
+      function updateField() {
+        const inputTarget = document.getElementById('swgtarget');
+        const inputHysteresis = document.getElementById('swghysteresis');
+        const inputInterval = document.getElementById('swginterval');
+        const swg0 = document.getElementById('swgpcttxt0');
+        const swg1 = document.getElementById('swgpcttxt1');
+        const swg2 = document.getElementById('swgpcttxt2');
+        const swg3 = document.getElementById('swgpcttxt3');
+        const swg4 = document.getElementById('swgpcttxt4');
+
+        const tgtValue = Number(inputTarget.value);
+        const hystValue = Number(inputHysteresis.value);
+        const intValue = Number(inputInterval.value);
+
+        swg0.textContent = `ORP ${tgtValue - hystValue - (intValue*1)} - ${tgtValue - hystValue - (intValue * 0)} mV (%):`;
+        swg1.textContent = `ORP ${tgtValue - hystValue - (intValue*2)} - ${tgtValue - hystValue - (intValue * 1)} mV (%):`;
+        swg2.textContent = `ORP ${tgtValue - hystValue - (intValue*3)} - ${tgtValue - hystValue - (intValue * 2)} mV (%):`;
+        swg3.textContent = `ORP ${tgtValue - hystValue - (intValue*4)} - ${tgtValue - hystValue - (intValue * 3)} mV (%):`;
+        swg4.textContent = `ORP ${tgtValue - hystValue - (intValue*5)} - ${tgtValue - hystValue - (intValue * 4)} mV (%):`;
+      }
+    </script>
     <div class="form-container">
         <h1 >ORP Configuration</h1>
         <form action="/submit" method="POST">
@@ -1173,9 +1374,89 @@ const char* htmlMqttPumpTopic = R"rawliteral(
             <input type="text" id="pumptopic" name="pumptopic" value="%s" required>
 )rawliteral";
 
+const char* htmlMqttSWGTopic = R"rawliteral(
+            <label for="swgtopic">MQTT SWG Topic:</label>
+            <input type="text" id="swgtopic" name="swgtopic" value="%s" required>
+)rawliteral";
+
 const char* htmlOrpCalmV = R"rawliteral(
-            <label for="orpcal">ORP Calibration mV:</label>
-            <input type="text" id="orpcal" name="orpcal" value="%d" required>
+            <div class="form-group">
+            <label2 for="orpcal">ORP Calibration mV:</label2>
+            <input type="side" id="orpcal" name="orpcal" value="%d" required>
+            </div>
+)rawliteral";
+
+const char* htmlSWGTgt = R"rawliteral(
+            <div class="form-group">
+            <label2 for="swgtarget">SWG Target mV:</label2>
+            <input type="side" id="swgtarget" name="swgtarget" onchange="updateField()" value="%d" required>
+            </div>
+)rawliteral";
+
+const char* htmlSWGHyst = R"rawliteral(
+            <div class="form-group">
+            <label2 for="swghysteresis">SWG Hysteresis mV:</label2>
+            <input type="side" id="swghysteresis" name="swghysteresis" onchange="updateField()" value="%d" required>
+            </div>
+)rawliteral";
+
+const char* htmlSWGStdDev = R"rawliteral(
+            <div class="form-group">
+            <label2 for="swgstddev">SWG Std Deviation mV:</label2>
+            <input type="side" id="swgstddev" name="swgstddev" value="%d" required>
+            </div>
+)rawliteral";
+
+const char* htmlSWGInterval = R"rawliteral(
+            <div class="form-group">
+            <label2 for="swginterval">SWG Interval mV:</label2>
+            <input type="side" id="swginterval" name="swginterval" onchange="updateField()" value="%d" required>
+            </div>
+)rawliteral";
+
+const char* htmlSWGTime = R"rawliteral(
+            <div class="form-group">
+            <label2 for="swgtime">SWG Sample Time (sec):</label2>
+            <input type="side" id="swgtime" name="swgtime" value="%d" required>
+            </div>
+)rawliteral";
+
+const char* htmlSWGCtrl = R"rawliteral(
+            <div class="form-group">
+            <label2 for="swgctrl">Enable SWG Change:</label2>
+            <input type="checkbox" id="swgctrl" name="swgctrl" %s>
+            </div>
+)rawliteral";
+
+const char* htmlSWGPct0 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="swgpcttxt0" for="swgpct0">ORP %d - %d mV (%%):</label2>
+            <input type="side" id="swgpct0" name="swgpct0" value="%d">
+            </div>
+)rawliteral";
+const char* htmlSWGPct1 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="swgpcttxt1" for="swgpct1">ORP %d - %d mV (%%):</label2>
+            <input type="side" id="swgpct1" name="swgpct1" value="%d">
+            </div>
+)rawliteral";
+const char* htmlSWGPct2 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="swgpcttxt2" for="swgpct2">ORP %d - %d mV (%%):</label2>
+            <input type="side" id="swgpct2" name="swgpct2" value="%d">
+            </div>
+)rawliteral";
+const char* htmlSWGPct3 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="swgpcttxt3" for="swgpct3">ORP %d - %d mV (%%):</label2>
+            <input type="side" id="swgpct3" name="swgpct3" value="%d">
+            </div>
+)rawliteral";
+const char* htmlSWGPct4 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="swgpcttxt4" for="swgpct4">ORP %d - %d mV (%%):</label2>
+            <input type="side" id="swgpct4" name="swgpct4" value="%d">
+            </div>
 )rawliteral";
 
 const char* htmlFormEnd = R"rawliteral(
@@ -1218,7 +1499,54 @@ void web_handle_root()
   snprintf(temp, sizeof(temp), htmlMqttPumpTopic, setting_info.mqtt_pump_topic);
   server.sendContent(temp);  
 
+  snprintf(temp, sizeof(temp), htmlMqttSWGTopic, setting_info.mqtt_swg_topic);
+  server.sendContent(temp);
+
   snprintf(temp, sizeof(temp), htmlOrpCalmV, setting_info.orp_cal_mV);
+  server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlSWGCtrl, setting_info.swg_enable ? "checked" : "");
+  server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlSWGTgt, setting_info.swg_orp_target);
+  server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlSWGHyst, setting_info.swg_orp_hysteresis);
+  server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlSWGStdDev, setting_info.swg_orp_std_dev);
+  server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlSWGInterval, setting_info.swg_orp_interval);
+  server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlSWGTime, setting_info.swg_data_sample_time_sec);
+  server.sendContent(temp);
+
+  snprintf(temp, sizeof(temp), htmlSWGPct0,
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 1),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 0),
+           setting_info.swg_orp_pct[0]);
+  server.sendContent(temp);
+  snprintf(temp, sizeof(temp), htmlSWGPct1,
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 2),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 1),
+           setting_info.swg_orp_pct[1]);
+  server.sendContent(temp);
+  snprintf(temp, sizeof(temp), htmlSWGPct2,
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 3),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 2),
+           setting_info.swg_orp_pct[2]);
+  server.sendContent(temp);
+  snprintf(temp, sizeof(temp), htmlSWGPct3,
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 4),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 3),
+           setting_info.swg_orp_pct[3]);
+  server.sendContent(temp);
+  snprintf(temp, sizeof(temp), htmlSWGPct4,
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 5),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 4),
+           setting_info.swg_orp_pct[4]);
   server.sendContent(temp);
 
   snprintf(temp, sizeof(temp), htmlFormEnd, receivedMessage.c_str());
@@ -1269,15 +1597,79 @@ void web_handle_mqtt_submit()
     strncpy(setting_info.mqtt_pump_topic, server.arg("pumptopic").c_str(), 64);
     setting_info.mqtt_pump_topic[63] = 0;
   }
+  if (server.hasArg("swgtopic")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgtopic");
+    strncpy(setting_info.mqtt_swg_topic, server.arg("swgtopic").c_str(), 64);
+    setting_info.mqtt_swg_topic[63] = 0;
+  }
   if (server.hasArg("orpcal")) {
     receivedMessage += " ";
     receivedMessage += server.arg("orpcal");
     setting_info.orp_cal_mV = atoi(server.arg("orpcal").c_str());
   }
 
+  if (server.hasArg("swgtarget")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgtarget");
+    setting_info.swg_orp_target = atoi(server.arg("swgtarget").c_str());
+  }
+  if (server.hasArg("swghysteresis")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swghysteresis");
+    setting_info.swg_orp_hysteresis = atoi(server.arg("swghysteresis").c_str());
+  }
+  if (server.hasArg("swgstddev")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgstddev");
+    setting_info.swg_orp_std_dev = atoi(server.arg("swgstddev").c_str());
+  }
+  if (server.hasArg("swginterval")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swginterval");
+    setting_info.swg_orp_interval = atoi(server.arg("swginterval").c_str());
+  }
+  if (server.hasArg("swgtime")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgtime");
+    setting_info.swg_data_sample_time_sec = atoi(server.arg("swgtime").c_str());
+  }
+  if (server.hasArg("swgpct0")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgpct0");
+    setting_info.swg_orp_pct[0] = atoi(server.arg("swgpct0").c_str());
+  }
+  if (server.hasArg("swgpct1")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgpct1");
+    setting_info.swg_orp_pct[1] = atoi(server.arg("swgpct1").c_str());
+  }
+  if (server.hasArg("swgpct2")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgpct2");
+    setting_info.swg_orp_pct[2] = atoi(server.arg("swgpct2").c_str());
+  }
+  if (server.hasArg("swgpct3")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgpct3");
+    setting_info.swg_orp_pct[3] = atoi(server.arg("swgpct3").c_str());
+  }
+  if (server.hasArg("swgpct4")) {
+    receivedMessage += " ";
+    receivedMessage += server.arg("swgpct4");
+    setting_info.swg_orp_pct[4] = atoi(server.arg("swgpct4").c_str());
+  }
+  if (server.hasArg("swgctrl")) {
+    receivedMessage += " SWG Enable";
+    setting_info.swg_enable = 1;
+  } else {
+    receivedMessage += " SWG Disable";
+    setting_info.swg_enable = 0;
+  }
+
   DBG_PRINT("Received message: ");
   DBG_PRINTLN(receivedMessage);
-  wifi_setting_save();
+  system_setting_save();
 
   // Redirect back to the main page after submission
   server.sendHeader("Location", "/");
@@ -1310,13 +1702,30 @@ void mqtt_msg_recv(int messageSize)
   MQTT_PRINT(" \"");
   MQTT_PRINT((char *) msg);
   MQTT_PRINTLN("\"");
-  if (strlen(setting_info.mqtt_pump_topic) > 0 &&
-      strcasecmp(topic, setting_info.mqtt_pump_topic) == 0) {
-    if (strcmp((char *) msg, "0") == 0) {
-      mqtt_pump_state = 0;
-    } else if (strcmp((char *) msg, "1") == 0) {
-      mqtt_pump_state = 1;
-    }
+  if (strlen(mqtt_pump_topic_match) > 0 &&
+      strstr(topic, mqtt_pump_topic_match) != NULL) {
+    if (strcmp(topic, mqtt_pump_topic_match) == 0) {
+      if (strcmp((char *) msg, "0") == 0) {
+        mqtt_pump_state = 0;
+      } else if (strcmp((char *) msg, "1") == 0) {
+        mqtt_pump_state = 1;
+      }
+    }  
+    // else if (strstr(topic, "/RPM") != NULL) {
+    //   if (atoi((char *) msg) <= 100)
+    //     mqtt_pump_state = 0;
+    // } else if (strstr(topic, "/Watts") != NULL) {
+    //   if (atoi((char *) msg) <= 100)
+    //     mqtt_pump_state = 0;
+    // }
+  }
+  if (strlen(setting_info.mqtt_swg_topic) > 0 &&
+      strcasecmp(topic, setting_info.mqtt_swg_topic) == 0) {
+    mqtt_swg_pct = atoi((char *) msg);
+    if (mqtt_swg_pct < 0)
+      mqtt_swg_pct = -1;
+    else if (mqtt_swg_pct > 100)
+      mqtt_swg_pct = -1;
   }
 }
 
@@ -1403,6 +1812,9 @@ int mqtt_connect()
       // If no pump topic, assume pump is on.
       mqtt_pump_state = 1;
     }
+    if (strlen(setting_info.mqtt_swg_topic) > 0) {
+      mqtt_client.subscribe(setting_info.mqtt_swg_topic);
+    }
     set_status_msg("MQTT subscribed");
     oled_screen_refresh = 1;
     oled_update_mqtt_connect(1);
@@ -1419,14 +1831,52 @@ int mqtt_connect()
   }
 }
 
+unsigned long mqtt_publish_ts = 0;
+float mqtt_publish_orp = -1;
+
 void mqtt_publish(float orp)
 {
   char msg[40];
+
+  // Only publish every 15 seconds if it is the same value
+  if (mqtt_publish_orp == orp) {
+    if ((millis() - mqtt_publish_ts) <= 15000) {
+      return;
+    }
+  }
+
   sprintf(msg, "%0.1f", orp);
   mqtt_client.beginMessage(setting_info.mqtt_topic);
   mqtt_client.print(msg);
   mqtt_client.endMessage();
-  MQTT_PRINT("MQTT: ");
+  MQTT_PRINT("MQTT: ORP ");
+  MQTT_PRINTLN(msg);
+  mqtt_publish_orp = orp;
+  mqtt_publish_ts = millis();
+}
+
+void mqtt_swg_publish(int pct)
+{
+  char msg_topic[80];
+  char msg[40];
+
+  if (strlen(setting_info.mqtt_swg_topic) <= 0) {
+    return;
+  }
+
+  if (!setting_info.swg_enable) {
+    return;
+  }
+
+  if (strstr(setting_info.mqtt_swg_topic, "set") == NULL)
+    sprintf(msg_topic, "%s/set", setting_info.mqtt_swg_topic);
+  else
+    sprintf(msg_topic, "%s", setting_info.mqtt_swg_topic);
+  sprintf(msg, "%d", pct);
+  mqtt_client.beginMessage(msg_topic);
+  mqtt_client.print(msg);
+  mqtt_client.endMessage();
+  MQTT_PRINT("MQTT: SWG ");
   MQTT_PRINTLN(msg);
 }
 
@@ -1448,14 +1898,39 @@ int mqtt_is_pump_on()
     return 1;
   return 0;
 }
+
+int mdns_loop()
+{
+  if (!is_wifi_connected())
+   return 0;
+
+  if (mdns_ready) {
+    mdns.run();
+    return 1;
+  }
+
+  if ((millis() - mdns_ready_ts) < 5000) {
+    return 0;
+  }
+
+  if (!mdns.begin(WiFi.localIP(), setting_info.hostname)) {
+    set_status_msg("mDNS failed");
+    mdns_ready_ts = millis();
+    return 0;
+  }
+  mdns_ready = 1;
+  mdns.addServiceRecord("http", HTTP_PORT, MDNSServiceTCP);
+  return 1;
+}
 #else
 int wifi_loop() { return 1; }
 void mqtt_loop() {}
 void web_loop() {}
-void wifi_rssi_update() {}
+void wifi_link_chk_loop() {}
 int mqtt_is_subscribed() { return 0; }
 int mqtt_connect() { return 1; }
 int mqtt_is_pump_on() { return 1; }
+int mdns_loop() {}
 #endif /* WIFI_SUPPORT */
 
 void setup()
@@ -1471,6 +1946,7 @@ void setup()
   wifi_setup();
   mqtt_setup();
   web_setup();
+  orp_data_setup();
 }
 
 void loop()
@@ -1480,6 +1956,8 @@ void loop()
   orp_loop();
   mqtt_loop();
   web_loop();
+  mdns_loop();
+  orp_swg_ctrl_loop();
 
   switch (op_state) {
   case OP_MENU:
@@ -1518,5 +1996,5 @@ void loop()
   
   oled_idle_check();
   check_status_msg_expired();
-  wifi_rssi_update();
+  wifi_link_chk_loop();
 }
