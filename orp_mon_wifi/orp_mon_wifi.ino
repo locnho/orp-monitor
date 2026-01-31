@@ -185,7 +185,6 @@ unsigned long mqtt_connect_ts = 0;
 int mqtt_connect_first_time = 1;
 int mqtt_pump_state = -1;
 int mqtt_swg_pct = -1;
-int mqtt_swg_pct_set = -1;
 
 //
 // Serial Setup
@@ -231,6 +230,35 @@ void rotary_button_setup()
   rotary.setChangedHandler(button_rotate);
   button.begin(BUTTON_PIN);
   button.setTapHandler(button_click);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Data Samples Statistic
+///////////////////////////////////////////////////////////////////////////////
+#include "swganalyzer.h"
+unsigned long orp_swg_ctl_chk_ts;
+SWGAnalyzer swg_anlyzer;
+
+void orp_data_setup()
+{
+  swg_anlyzer.setup(setting_info.swg_data_sample_time_sec, setting_info.swg_orp_std_dev, setting_info.swg_orp_target,
+                    setting_info.swg_orp_hysteresis, setting_info.swg_orp_interval, setting_info.swg_orp_guard,
+                    setting_info.swg_orp_pct);
+}
+
+void orp_swg_ctrl_loop()
+{
+  int swg_pct;
+
+  if ((millis() - orp_swg_ctl_chk_ts) <= 15000) {
+    return;
+  }
+
+  swg_pct = swg_anlyzer.get_swg_pct();
+  if (swg_pct >= 0) {
+    swg_set(swg_pct);
+  }
+  orp_swg_ctl_chk_ts = millis();
 }
 
 //
@@ -394,7 +422,7 @@ void oled_alive_update()
   }
 }
 
-void oled_title_update(int show_ip = 1)
+void oled_title_update(int show_ip = 0)
 {
   u8g2.setFont(u8g2_font_crox5tb_tf);
   u8g2.drawStr(8 * 5, 16, "ORP");
@@ -446,8 +474,8 @@ void oled_status_alive_update_print()
 
 void oled_update_normal(bool now)
 {
-  char msg1[30];
-  char msg2[10];
+  char msg1[40];
+  char msg2[40];
 
   if (now == 0 && (millis() - oled_refresh_ts) <= 1000)
     return;
@@ -476,6 +504,8 @@ void oled_update_normal(bool now)
   }
   STATUS_PRINTLN(msg1);
   STATUS_PRINTLN(msg2);
+  STATUS_PRINTLN(swg_anlyzer.get_last_orp());
+  STATUS_PRINTLN(swg_anlyzer.get_last_swg_pct());
   oled_status_alive_update_print();
 
   if (!oled_detected)
@@ -485,18 +515,30 @@ void oled_update_normal(bool now)
   oled_title_update();
   oled_status_alive_update();
 
-  //u8g2.setFont(u8g2_font_ncenB18_tf);
-  u8g2.setFont(u8g2_font_crox5t_tf);
+  u8g2.setFont(u8g2_font_ncenR18_tf);
+  if (u8g2.getStrWidth(msg2) >= 128)
+    u8g2.setFont(u8g2_font_ncenR14_tf);
   int x = (u8g2.getDisplayWidth()-10 - u8g2.getStrWidth(msg2)) / 2;
-  if (setting_info.swg_enable)
-    u8g2.drawButtonUTF8(5 + x, 40, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg2);
-  else
-    u8g2.drawButtonUTF8(5 + x, 40, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg1);
   int x2 = u8g2.getStrWidth(msg1);
+  if (setting_info.swg_enable)
+    u8g2.drawButtonUTF8(5 + x, 34, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg2);
+  else
+    u8g2.drawButtonUTF8(5 + x, 34, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg1);
+  u8g2.setFont(u8g2_font_ncenR08_tf);
+  u8g2.drawStr(5 + x + x2, 25, "m");
+  u8g2.drawStr(5 + x + x2, 34, "V");
 
-  u8g2.setFont(u8g2_font_helvR08_tf);
-  u8g2.drawStr(5 + x + x2 + 2, 30, "m");
-  u8g2.drawStr(5 + x + x2 + 2, 40, "V");
+  u8g2.setFont(u8g2_font_ncenR12_tf);
+  float v1 = swg_anlyzer.get_last_orp();
+  int v2 = swg_anlyzer.get_last_swg_pct();
+  sprintf(msg1, "%0.1f", v1);
+  sprintf(msg2, "%0.1f   %d%%", v1, v2);
+  x = (u8g2.getDisplayWidth()-10 - u8g2.getStrWidth(msg2)) / 2;
+  x2 = u8g2.getStrWidth(msg1);
+  u8g2.drawButtonUTF8(5 + x, 48 + 2, U8G2_BTN_BW0, u8g2.getDisplayWidth()-5*2,  0,  0, msg2);
+  u8g2.setFont(u8g2_font_ncenR08_tf);
+  u8g2.drawStr(5 + x + x2 + 1, 39 + 2, "m");
+  u8g2.drawStr(5 + x + x2 + 1, 48 + 2, "V");
 
   u8g2.sendBuffer();
 }
@@ -793,39 +835,9 @@ void swg_set(int percent)
   ORP_PRINT("Set SWG ");
   ORP_PRINTLN(percent);
 
-  if (mqtt_swg_pct_set != percent) {
+  if (mqtt_swg_pct != percent) {
     mqtt_swg_publish(percent);
-    mqtt_swg_pct_set = percent;
   }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// Data Samples Statistic
-///////////////////////////////////////////////////////////////////////////////
-#include "swganalyzer.h"
-unsigned long orp_swg_ctl_chk_ts;
-SWGAnalyzer swg_anlyzer;
-
-void orp_data_setup()
-{
-  swg_anlyzer.setup(setting_info.swg_data_sample_time_sec, setting_info.swg_orp_std_dev, setting_info.swg_orp_target,
-                    setting_info.swg_orp_hysteresis, setting_info.swg_orp_interval, setting_info.swg_orp_guard,
-                    setting_info.swg_orp_pct);
-}
-
-void orp_swg_ctrl_loop()
-{
-  int swg_pct;
-
-  if ((millis() - orp_swg_ctl_chk_ts) <= 15000) {
-    return;
-  }
-
-  swg_pct = swg_anlyzer.get_swg_pct();
-  if (swg_pct >= 0) {
-    swg_set(swg_pct);
-  }
-  orp_swg_ctl_chk_ts = millis();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1091,7 +1103,7 @@ void orp_loop()
     }
     orp_line[orp_line_cnt] = 0;
     orp_reading = atof(orp_line);
-    char msg[40];
+    char msg[80];
     sprintf(msg, "ORP: %0.1f", orp_reading);
     ORP_PRINTLN(msg);
     ord_ts = millis();
@@ -1327,11 +1339,11 @@ const char* htmlFormStart = R"rawliteral(
         const hystValue = Number(inputHysteresis.value);
         const intValue = Number(inputInterval.value);
 
-        swg0.textContent = `ORP ${tgtValue - hystValue - (intValue*1)} - ${tgtValue - hystValue - (intValue * 0)} mV (%):`;
-        swg1.textContent = `ORP ${tgtValue - hystValue - (intValue*2)} - ${tgtValue - hystValue - (intValue * 1)} mV (%):`;
-        swg2.textContent = `ORP ${tgtValue - hystValue - (intValue*3)} - ${tgtValue - hystValue - (intValue * 2)} mV (%):`;
-        swg3.textContent = `ORP ${tgtValue - hystValue - (intValue*4)} - ${tgtValue - hystValue - (intValue * 3)} mV (%):`;
-        swg4.textContent = `ORP ${tgtValue - hystValue - (intValue*5)} - ${tgtValue - hystValue - (intValue * 4)} mV (%):`;
+        swg0.textContent = `ORP ${tgtValue - hystValue - (intValue*1) + 1} - ${tgtValue - hystValue - (intValue * 0)} mV (%):`;
+        swg1.textContent = `ORP ${tgtValue - hystValue - (intValue*2) + 1} - ${tgtValue - hystValue - (intValue * 1)} mV (%):`;
+        swg2.textContent = `ORP ${tgtValue - hystValue - (intValue*3) + 1} - ${tgtValue - hystValue - (intValue * 2)} mV (%):`;
+        swg3.textContent = `ORP ${tgtValue - hystValue - (intValue*4) + 1} - ${tgtValue - hystValue - (intValue * 3)} mV (%):`;
+        swg4.textContent = `ORP ${tgtValue - hystValue - (intValue*5) + 1} - ${tgtValue - hystValue - (intValue * 4)} mV (%):`;
       }
     </script>
     <div class="form-container">
@@ -1524,22 +1536,22 @@ void web_handle_root()
   server.sendContent(temp);
 
   snprintf(temp, sizeof(temp), htmlSWGPct0,
-           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 1),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 1) + 1,
            setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 0),
            setting_info.swg_orp_pct[0]);
   server.sendContent(temp);
   snprintf(temp, sizeof(temp), htmlSWGPct1,
-           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 2),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 2) + 1,
            setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 1),
            setting_info.swg_orp_pct[1]);
   server.sendContent(temp);
   snprintf(temp, sizeof(temp), htmlSWGPct2,
-           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 3),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 3) + 1,
            setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 2),
            setting_info.swg_orp_pct[2]);
   server.sendContent(temp);
   snprintf(temp, sizeof(temp), htmlSWGPct3,
-           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 4),
+           setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 4) + 1,
            setting_info.swg_orp_target - setting_info.swg_orp_hysteresis - (setting_info.swg_orp_interval * 3),
            setting_info.swg_orp_pct[3]);
   server.sendContent(temp);
@@ -1858,7 +1870,7 @@ void mqtt_publish(float orp)
 void mqtt_swg_publish(int pct)
 {
   char msg_topic[80];
-  char msg[40];
+  char msg[80];
 
   if (strlen(setting_info.mqtt_swg_topic) <= 0) {
     return;

@@ -21,6 +21,9 @@ public:
   void orp_add(float val);
   int get_swg_pct();
 
+  float get_last_orp();
+  int get_last_swg_pct();
+
 protected:
   float orp_data[MAX_ORP_DATA];
   unsigned long orp_data_ts[MAX_ORP_DATA];
@@ -36,6 +39,9 @@ protected:
   int orp_guard;
   int orp_pct[5];
   int orp_low_bound;
+
+  float last_orp;
+  int last_orp_pct;
 
   int orp_std_deviation(float &std_dev, float &mean);
 };

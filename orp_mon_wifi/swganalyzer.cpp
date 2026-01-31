@@ -42,6 +42,8 @@ void SWGAnalyzer::setup(int sample_time_sec, int std_dev, int orp_target_val, in
   }
 
   orp_low_bound = orp_target - orp_hysteresis - (orp_interval * 5);
+  last_orp_pct = 0;
+  last_orp = 0;
 }
 
 void SWGAnalyzer::orp_add(float val)
@@ -63,7 +65,8 @@ int SWGAnalyzer::orp_std_deviation(float &std_dev, float &mean)
   int i;
 
   int total_data = 0;
-  mean = 0.0; 
+  mean = 0.0;
+  std_dev = 0.0;
   // Calculate the mean
   unsigned long ts = millis();
   for (i = 0; i < max_sample; ++i) {
@@ -77,10 +80,14 @@ int SWGAnalyzer::orp_std_deviation(float &std_dev, float &mean)
     mean += orp_data[i];
     total_data++;
   }
-  if (total_data <= 0)
+  if (total_data <= 0) {
+    mean = 0.0;
     return -1;
-  if (total_data < int(max_sample * 0.75))
+  }
+  if (total_data < int(max_sample * 0.75)) {
+    mean = 0.0;
     return -1;
+  }
 
   mean /= total_data;
 
@@ -106,30 +113,55 @@ int SWGAnalyzer::get_swg_pct()
   float mean;
   
   if (orp_std_deviation(std_dev, mean) < 0) {
+    last_orp = mean;
+    last_orp_pct = 0;
     return -1;
   }
 
   if (mean >= (orp_target - orp_hysteresis)) {
+    last_orp = mean;
+    last_orp_pct = 0;
     return 0;
   }
   if (mean < orp_low_bound) {
+    last_orp = mean;
+    last_orp_pct = 0;
     return 0;
   }
   if (mean > orp_target) {
     mean = orp_target;
   }
 
+  last_orp = mean;
+
   int base_orp = orp_target - orp_hysteresis;
-  if (mean >= (base_orp - (orp_interval * 1) + 1))
+  if (mean >= (base_orp - (orp_interval * 1) + 1)) {
+    last_orp_pct = orp_pct[0];
     return orp_pct[0];
-  else if (mean >= (base_orp - (orp_interval * 2) + 1) && mean <= (base_orp - (orp_interval * 1)))
+  } else if (mean >= (base_orp - (orp_interval * 2) + 1) && mean <= (base_orp - (orp_interval * 1))) {
+    last_orp_pct = orp_pct[1];
     return orp_pct[1];
-  else if (mean >= (base_orp - (orp_interval * 3) + 1) && mean <= (base_orp - (orp_interval * 2)))
+  } else if (mean >= (base_orp - (orp_interval * 3) + 1) && mean <= (base_orp - (orp_interval * 2))) {
+    last_orp_pct = orp_pct[2];
     return orp_pct[2];
-  else if (mean >= (base_orp - (orp_interval * 4) + 1) && mean <= (base_orp - (orp_interval * 3)))
+  } else if (mean >= (base_orp - (orp_interval * 4) + 1) && mean <= (base_orp - (orp_interval * 3))) {
+    last_orp_pct = orp_pct[3];
     return orp_pct[3];
-  else if (mean >= (base_orp - (orp_interval * 5) + 1) && mean <= (base_orp - (orp_interval * 4)))
+  } else if (mean >= (base_orp - (orp_interval * 5) + 1) && mean <= (base_orp - (orp_interval * 4))) {
+    last_orp_pct = orp_pct[4];
     return orp_pct[4];
-  else
+  } else {
+    last_orp_pct = orp_pct[5];
     return orp_pct[5];
+  }
+}
+
+float SWGAnalyzer::get_last_orp()
+{
+  return last_orp;
+}
+
+int SWGAnalyzer::get_last_swg_pct()
+{
+  return last_orp_pct;
 }
