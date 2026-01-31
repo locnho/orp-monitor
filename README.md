@@ -61,6 +61,16 @@ If the pump is not running, ORP value of 0.0 is reported using the ``MQTT Pump T
 
 If your ORP calibration solution isn't 225 mV, change the ORP calibration value. Then click on the ``Submit`` button.
 
+If you want this device to control the SWG percentage, check the box "Enable SWG Change:".
+
+The ORP value is computed using the mean of "SWG Sample Time" sample. Each second is a sample. If the standard deviation is more than the specified value, then ignore the reading. This ensures a stable ORP reading value.
+
+If the compute ORP value is above "SWG Target mV" - "SWG Hysteresis mV", then set SWG to 0%.
+
+If the compute ORP value is within the range as shown in the figure below, set the SWG percent to the configured value.
+
+If ORP value below the configured range, then set the SWG to 0%.
+
 <img src="images/orp_monitor_config.png" width="256"/>
 
 # How To Calibrate ORP Probe
@@ -82,7 +92,18 @@ The upper right WiFi bar indicate the WiFi RSSI strength.
 
 The "MQTT" indicates that it is connected to a MQTT broker.
 
-The IP address on the screen shows its IP address.
+The first line reading shows:
+
+  * ORP reading as from Atlas probe
+  * Percentage of the SWG (if enabled support)
+
+The second line reading shows:
+
+  * ORP reading as computed
+  * SWG percent this device configured the SWG via MQTT
+
+
+
 
 The screen will turn off after some idle time. Press the button to show the screen.
 

@@ -250,7 +250,7 @@ void orp_swg_ctrl_loop()
 {
   int swg_pct;
 
-  if ((millis() - orp_swg_ctl_chk_ts) <= 15000) {
+  if ((millis() - orp_swg_ctl_chk_ts) <= 60000) {
     return;
   }
 
