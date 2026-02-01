@@ -24,6 +24,10 @@ public:
   float get_last_orp();
   int get_last_swg_pct();
 
+  void enable_datetime_check(int enable);
+  int is_scheduled();
+  void set_schedule(int day_num, int start, int end);
+
 protected:
   float orp_data[MAX_ORP_DATA];
   unsigned long orp_data_ts[MAX_ORP_DATA];
@@ -42,6 +46,10 @@ protected:
 
   float last_orp;
   int last_orp_pct;
+
+  int date_check;
+  unsigned int start_time[7];
+  unsigned int end_time[7];
 
   int orp_std_deviation(float &std_dev, float &mean);
 };

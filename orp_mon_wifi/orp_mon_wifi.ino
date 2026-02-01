@@ -16,6 +16,8 @@
 #include <Wire.h>
 #include <HardwareSerial.h>
 
+#include <TimeLib.h>
+
 #define DBG_SUPPORT 1     /* Print general debug information */
 //#define DBG_STATUS 1    /* Print equivalent of menu on serail port */
 //#define DBG_MQTT 1        /* Print MQTT messages */
@@ -128,6 +130,7 @@ typedef struct {
   char mqtt_pump_topic[64];
   char mqtt_swg_topic[64];
   char hostname[64];
+  char mqtt_datetime_topic[64];
   int mqtt_port;
   int orp_cal_mV;
   int swg_enable;
@@ -138,6 +141,9 @@ typedef struct {
   int swg_orp_guard;
   int swg_orp_pct[5];
   int swg_data_sample_time_sec;
+
+  int start_schedule[7];
+  int end_schedule[7];
 } Setting_Info;
 
 #define SIGNATURE1    0x57494649
@@ -147,11 +153,14 @@ typedef struct {
 #define MQTT_TOPIC_DEFAULT          "aqualinkd/CHEM/ORP/set"
 #define MQTT_TOPIC_PUMP_DEFAULT     "aqualinkd/Filter_Pump"
 #define MQTT_TOPIC_SWG_DEFAULT      "aqualinkd/SWG/Percent"
+#define MQTT_TOPIC_DATETIME_DEFAULT "datetime"
 #define MQTT_USER_DEFAULT     "pi"
 #define MQTT_PORT_DEFAULT     1883
 #define HOSTNAME_DEFAULT      "ORP"
 #define ORP_CAL_MV_DEFAULT    225
 #define SWG_ENABLE_DEFAULT    1
+#define START_SCHEDULE_DEFAULT    (9*60*60)
+#define END_SCHEDULE_DEFAULT      (15*60*60)
 Setting_Info setting_info;
 
 char mqtt_pump_topic_match[64];
@@ -213,7 +222,7 @@ void clear_status_msg()
 
 void check_status_msg_expired()
 {
-  if (status_msg[0] != 0 && (millis() - status_msg_ts) > 30000) {
+  if (status_msg[0] != 0 && (millis() - status_msg_ts) > 10000) {
     clear_status_msg();
     oled_screen_refresh = 1;
   }
@@ -244,6 +253,14 @@ void orp_data_setup()
   swg_anlyzer.setup(setting_info.swg_data_sample_time_sec, setting_info.swg_orp_std_dev, setting_info.swg_orp_target,
                     setting_info.swg_orp_hysteresis, setting_info.swg_orp_interval, setting_info.swg_orp_guard,
                     setting_info.swg_orp_pct);
+
+  for (int i = 0; i < 7; i++) {
+    swg_anlyzer.set_schedule(i, setting_info.start_schedule[i], setting_info.end_schedule[i]);
+  }
+  if (strlen(setting_info.mqtt_datetime_topic) > 0)
+    swg_anlyzer.enable_datetime_check(1);
+  else
+    swg_anlyzer.enable_datetime_check(0);
 }
 
 void orp_swg_ctrl_loop()
@@ -251,6 +268,10 @@ void orp_swg_ctrl_loop()
   int swg_pct;
 
   if ((millis() - orp_swg_ctl_chk_ts) <= 60000) {
+    return;
+  }
+
+  if (!swg_anlyzer.is_scheduled()) {
     return;
   }
 
@@ -435,9 +456,13 @@ void oled_status_alive_update(int show_status = 1)
 {
   oled_alive_update();
   
+  u8g2.setFont(u8g2_font_helvB08_tf);
   if (show_status && strlen(status_msg) > 0) {
-    u8g2.setFont(u8g2_font_helvB08_tf);
     u8g2.drawStr(0, 63, status_msg);
+  } else if (timeStatus() == timeSet) {
+    char msg[40];
+    sprintf(msg, "%02d/%02d/%02d %02d:%02d:%02d", month(), day(), year(), hour(), minute(), second());
+    u8g2.drawStr(0, 63, msg);
   }
 }
 
@@ -878,6 +903,11 @@ void system_setting_clear()
   setting_info.swg_orp_pct[4] = SWG_ORP_PCT4_DEFAULT;
   setting_info.swg_enable = SWG_ENABLE_DEFAULT;
   strcpy(setting_info.mqtt_swg_topic, MQTT_TOPIC_SWG_DEFAULT);
+  strcpy(setting_info.mqtt_datetime_topic, MQTT_TOPIC_DATETIME_DEFAULT);
+  for (int i = 0; i < 7; i++){
+    setting_info.start_schedule[i] = START_SCHEDULE_DEFAULT;
+    setting_info.end_schedule[i] = END_SCHEDULE_DEFAULT;
+  }
 }
 
 void system_setting_init()
@@ -923,6 +953,18 @@ void system_setting_init()
   setting_info.swg_orp_pct[3] = prefs.getInt("SWGORPPCT3", SWG_ORP_PCT3_DEFAULT);
   setting_info.swg_orp_pct[4] = prefs.getInt("SWGORPPCT4", SWG_ORP_PCT4_DEFAULT);
   setting_info.swg_data_sample_time_sec = prefs.getInt("SWGTIME", SWG_DATA_SAMPLE_TIME_SEC_DEFAULT);
+
+  str = prefs.getString("MQTTDTTOPIC", MQTT_TOPIC_DATETIME_DEFAULT);
+  strcpy(setting_info.mqtt_datetime_topic, str.c_str());
+
+  for (int i = 0; i < 7; i++) {
+    char key_name[40];
+    sprintf(key_name, "STARTSCHEDULE%d", i);
+    setting_info.start_schedule[i] = prefs.getInt(key_name, START_SCHEDULE_DEFAULT);
+    sprintf(key_name, "ENDCHEDULE%d", i);
+    setting_info.end_schedule[i] = prefs.getInt(key_name, END_SCHEDULE_DEFAULT);
+  }
+
 #endif
   DBG_PRINT("WiFi: ");
   DBG_PRINTLN(setting_info.ssid);
@@ -967,6 +1009,16 @@ void system_setting_save()
   prefs.putInt("SWGORPPCT3", setting_info.swg_orp_pct[3]);
   prefs.putInt("SWGORPPCT4", setting_info.swg_orp_pct[4]);
   prefs.putInt("SWGTIME", setting_info.swg_data_sample_time_sec);
+
+  prefs.putString("MQTTDTTOPIC", setting_info.mqtt_datetime_topic);
+
+  for (int i = 0; i < 7; i++) {
+    char key_name[40];
+    sprintf(key_name, "STARTSCHEDULE%d", i);
+    prefs.putInt(key_name, setting_info.start_schedule[i]);
+    sprintf(key_name, "ENDCHEDULE%d", i);
+    prefs.putInt(key_name, setting_info.end_schedule[i]);
+  }
 #endif
 }
 
@@ -1118,7 +1170,9 @@ void orp_loop()
       mqtt_orp_publish_ts = millis();
     }
 #endif
-    swg_anlyzer.orp_add(orp_reading);
+    if (mqtt_is_pump_on()) {
+      swg_anlyzer.orp_add(orp_reading);
+    }
     break;
   }
 #endif
@@ -1301,6 +1355,16 @@ const char* htmlFormStart = R"rawliteral(
             box-sizing: border-box;
             font-size: 16px;
         }
+        input[type="side2"] {
+            flex-grow: 1;
+            width: 125px;
+            padding: 10px;
+            margin-bottom: 1px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
         input[type="submit"] {
             width: 100%;
             padding: 10px;
@@ -1377,18 +1441,18 @@ const char* htmlMqttPort = R"rawliteral(
 )rawliteral";
 
 const char* htmlMqttTopic = R"rawliteral(
-            <label for="topic">MQTT Topic:</label>
-            <input type="text" id="topic" name="topic" value="%s" required>
+            <label for="topic">MQTT ORP Topic:</label>
+            <input type="text" id="topic" name="topic" title="For AquaLinkD, set to 'aqualinkd/CHEM/ORP/set'" value="%s" required>
 )rawliteral";
 
 const char* htmlMqttPumpTopic = R"rawliteral(
             <label for="pumptopic">MQTT Pump Topic:</label>
-            <input type="text" id="pumptopic" name="pumptopic" value="%s" required>
+            <input type="text" id="pumptopic" name="pumptopic" title="For AquaLinkD, set to 'aqualinkd/Filter_Pump'" value="%s" required>
 )rawliteral";
 
 const char* htmlMqttSWGTopic = R"rawliteral(
             <label for="swgtopic">MQTT SWG Topic:</label>
-            <input type="text" id="swgtopic" name="swgtopic" value="%s" required>
+            <input type="text" id="swgtopic" name="swgtopic" title="For AquaLinkD, set to 'aqualinkd/SWG/Percent'" value="%s" required>
 )rawliteral";
 
 const char* htmlOrpCalmV = R"rawliteral(
@@ -1443,31 +1507,86 @@ const char* htmlSWGCtrl = R"rawliteral(
 const char* htmlSWGPct0 = R"rawliteral(
             <div class="form-group">
             <label2 id="swgpcttxt0" for="swgpct0">ORP %d - %d mV (%%):</label2>
-            <input type="side" id="swgpct0" name="swgpct0" value="%d">
+            <input type="side" id="swgpct0" name="swgpct0" value="%d" required>
             </div>
 )rawliteral";
 const char* htmlSWGPct1 = R"rawliteral(
             <div class="form-group">
             <label2 id="swgpcttxt1" for="swgpct1">ORP %d - %d mV (%%):</label2>
-            <input type="side" id="swgpct1" name="swgpct1" value="%d">
+            <input type="side" id="swgpct1" name="swgpct1" value="%d" required>
             </div>
 )rawliteral";
 const char* htmlSWGPct2 = R"rawliteral(
             <div class="form-group">
             <label2 id="swgpcttxt2" for="swgpct2">ORP %d - %d mV (%%):</label2>
-            <input type="side" id="swgpct2" name="swgpct2" value="%d">
+            <input type="side" id="swgpct2" name="swgpct2" value="%d" required>
             </div>
 )rawliteral";
 const char* htmlSWGPct3 = R"rawliteral(
             <div class="form-group">
             <label2 id="swgpcttxt3" for="swgpct3">ORP %d - %d mV (%%):</label2>
-            <input type="side" id="swgpct3" name="swgpct3" value="%d">
+            <input type="side" id="swgpct3" name="swgpct3" value="%d" required>
             </div>
 )rawliteral";
 const char* htmlSWGPct4 = R"rawliteral(
             <div class="form-group">
             <label2 id="swgpcttxt4" for="swgpct4">ORP %d - %d mV (%%):</label2>
-            <input type="side" id="swgpct4" name="swgpct4" value="%d">
+            <input type="side" id="swgpct4" name="swgpct4" value="%d" required>
+            </div>
+)rawliteral";
+
+const char* htmlMqttDTTopic = R"rawliteral(
+            <label for="dttopic">MQTT Date Topic:</label>
+            <input type="text" id="dttopic" name="dttopic" title="Set topic to 'datetime' to enable schedule. Leave blank to disable." value="%s" required>
+)rawliteral";
+
+const char* htmlSchedule0 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="scheduletxt0" for="schedule0">Sunday:</label2>
+            <input type="side2" id="schedule0" name="schedule0" value="%s" required>
+            <input type="side2" id="schedule0e" name="schedule0e" value="%s" required>
+            </div>
+)rawliteral";
+const char* htmlSchedule1 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="scheduletxt1" for="schedule1">Monday:</label2>
+            <input type="side2" id="schedule1" name="schedule1" value="%s" required>
+            <input type="side2" id="schedule1e" name="schedule1e" value="%s" required>
+            </div>
+)rawliteral";
+const char* htmlSchedule2 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="scheduletxt2" for="schedule2">Tuesday:</label2>
+            <input type="side2" id="schedule2" name="schedule2" value="%s" required>
+            <input type="side2" id="schedule2e" name="schedule2e" value="%s" required>
+            </div>
+)rawliteral";
+const char* htmlSchedule3 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="scheduletxt3" for="schedule3">Wednesday:</label2>
+            <input type="side2" id="schedule3" name="schedule3" value="%s" required>
+            <input type="side2" id="schedule3e" name="schedule3e" value="%s" required>
+            </div>
+)rawliteral";
+const char* htmlSchedule4 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="scheduletxt4" for="schedule4">Thursday:</label2>
+            <input type="side2" id="schedule4" name="schedule4" value="%s" required>
+            <input type="side2" id="schedule4e" name="schedule4e" value="%s" required>
+            </div>
+)rawliteral";
+const char* htmlSchedule5 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="scheduletxt5" for="schedule5">Friday:</label2>
+            <input type="side2" id="schedule5" name="schedule5" value="%s" required>
+            <input type="side2" id="schedule5e" name="schedule5e" value="%s" required>
+            </div>
+)rawliteral";
+const char* htmlSchedule6 = R"rawliteral(
+            <div class="form-group">
+            <label2 id="scheduletxt6" for="schedule6">Saturday:</label2>
+            <input type="side2" id="schedule6" name="schedule6" value="%s" required>
+            <input type="side2" id="schedule6e" name="schedule6e" value="%s" required>
             </div>
 )rawliteral";
 
@@ -1561,10 +1680,76 @@ void web_handle_root()
            setting_info.swg_orp_pct[4]);
   server.sendContent(temp);
 
+  char val1[40];
+  char val2[40];
+  int hr, minute, second;
+  int val;
+
+  snprintf(temp, sizeof(temp), htmlMqttDTTopic, setting_info.mqtt_datetime_topic);
+  server.sendContent(temp);
+
+  val = setting_info.start_schedule[0]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val1, "%02d:%02d:%02d", hr, minute, second);
+  val = setting_info.end_schedule[0]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val2, "%02d:%02d:%02d", hr, minute, second);
+  snprintf(temp, sizeof(temp), htmlSchedule0, val1, val2); server.sendContent(temp);
+
+  val = setting_info.start_schedule[1]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val1, "%02d:%02d:%02d", hr, minute, second);
+  val = setting_info.end_schedule[1]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val2, "%02d:%02d:%02d", hr, minute, second);
+  snprintf(temp, sizeof(temp), htmlSchedule1, val1, val2); server.sendContent(temp);
+
+  val = setting_info.start_schedule[2]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val1, "%02d:%02d:%02d", hr, minute, second);
+  val = setting_info.end_schedule[2]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val2, "%02d:%02d:%02d", hr, minute, second);
+  snprintf(temp, sizeof(temp), htmlSchedule2, val1, val2); server.sendContent(temp);
+
+  val = setting_info.start_schedule[3]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val1, "%02d:%02d:%02d", hr, minute, second);
+  val = setting_info.end_schedule[3]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val2, "%02d:%02d:%02d", hr, minute, second);
+  snprintf(temp, sizeof(temp), htmlSchedule3, val1, val2); server.sendContent(temp);
+
+  val = setting_info.start_schedule[4]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val1, "%02d:%02d:%02d", hr, minute, second);
+  val = setting_info.end_schedule[4]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val2, "%02d:%02d:%02d", hr, minute, second);
+  snprintf(temp, sizeof(temp), htmlSchedule4, val1, val2); server.sendContent(temp);
+
+  val = setting_info.start_schedule[5]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val1, "%02d:%02d:%02d", hr, minute, second);
+  val = setting_info.end_schedule[5]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val2, "%02d:%02d:%02d", hr, minute, second);
+  snprintf(temp, sizeof(temp), htmlSchedule5, val1, val2); server.sendContent(temp);
+
+  val = setting_info.start_schedule[6]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val1, "%02d:%02d:%02d", hr, minute, second);
+  val = setting_info.end_schedule[6]; hr = val / (60*60); val -= hr * 60 * 60; minute = val / 60; val -= minute * 60; second = val;
+  sprintf(val2, "%02d:%02d:%02d", hr, minute, second);
+  snprintf(temp, sizeof(temp), htmlSchedule6, val1, val2); server.sendContent(temp);
+
   snprintf(temp, sizeof(temp), htmlFormEnd, receivedMessage.c_str());
   server.sendContent(temp);
 
   server.sendContent(F(""));
+}
+
+int schedule_get_second(const char *msg)
+{
+  if (strlen(msg) < 8)
+    return -1;
+  if (!isdigit(msg[0]) && !isdigit(msg[1]) && msg[2] != ':')
+    return -1;
+  int hour = (msg[0] - '0') * 10 + msg[1] - '0';
+  if (!isdigit(msg[3]) && !isdigit(msg[4]) && msg[5] != ':')
+    return -1;
+  int minute = (msg[3] - '0') * 10 + msg[4] - '0';
+  if (!isdigit(msg[6]) && !isdigit(msg[7]))
+    return -1;
+  int second = (msg[6] - '0') * 10 + msg[7] - '0';
+  return (hour * 60 * 60) + (minute * 60) + second;
 }
 
 void web_handle_mqtt_submit()
@@ -1646,30 +1831,14 @@ void web_handle_mqtt_submit()
     receivedMessage += server.arg("swgtime");
     setting_info.swg_data_sample_time_sec = atoi(server.arg("swgtime").c_str());
   }
-  if (server.hasArg("swgpct0")) {
-    receivedMessage += " ";
-    receivedMessage += server.arg("swgpct0");
-    setting_info.swg_orp_pct[0] = atoi(server.arg("swgpct0").c_str());
-  }
-  if (server.hasArg("swgpct1")) {
-    receivedMessage += " ";
-    receivedMessage += server.arg("swgpct1");
-    setting_info.swg_orp_pct[1] = atoi(server.arg("swgpct1").c_str());
-  }
-  if (server.hasArg("swgpct2")) {
-    receivedMessage += " ";
-    receivedMessage += server.arg("swgpct2");
-    setting_info.swg_orp_pct[2] = atoi(server.arg("swgpct2").c_str());
-  }
-  if (server.hasArg("swgpct3")) {
-    receivedMessage += " ";
-    receivedMessage += server.arg("swgpct3");
-    setting_info.swg_orp_pct[3] = atoi(server.arg("swgpct3").c_str());
-  }
-  if (server.hasArg("swgpct4")) {
-    receivedMessage += " ";
-    receivedMessage += server.arg("swgpct4");
-    setting_info.swg_orp_pct[4] = atoi(server.arg("swgpct4").c_str());
+  for (int i = 0; i < 5; i++) {
+    char tag[40];
+    sprintf(tag, "swgpct%d", i);
+    if (server.hasArg(tag)) {
+      receivedMessage += " ";
+      receivedMessage += server.arg(tag);
+      setting_info.swg_orp_pct[i] = atoi(server.arg(tag).c_str());
+    }
   }
   if (server.hasArg("swgctrl")) {
     receivedMessage += " SWG Enable";
@@ -1679,6 +1848,24 @@ void web_handle_mqtt_submit()
     setting_info.swg_enable = 0;
   }
 
+  for (int i = 0; i < 7; i++) {
+    char tag0[40];
+    char tag1[40];
+    sprintf(tag0, "schedule%d", i);
+    sprintf(tag1, "schedule%de", i);
+    if (server.hasArg(tag0) && server.hasArg(tag1)) {
+      receivedMessage += " ";
+      receivedMessage += server.arg(tag0);
+      receivedMessage += server.arg(tag1);
+      int ts = schedule_get_second(server.arg(tag0).c_str());
+      int te = schedule_get_second(server.arg(tag1).c_str());
+      if (ts >= 0 &&  te >= 0 && ts < te) {
+        setting_info.start_schedule[i] = ts;
+        setting_info.end_schedule[i] = te;
+      }
+    }
+  }
+
   DBG_PRINT("Received message: ");
   DBG_PRINTLN(receivedMessage);
   system_setting_save();
@@ -1686,6 +1873,8 @@ void web_handle_mqtt_submit()
   // Redirect back to the main page after submission
   server.sendHeader("Location", "/");
   server.send(303); // Use 303 for "See Other" to prevent re-submission on refresh
+
+  orp_data_setup();
 
   mqtt_client.stop();
   mqtt_connect_first_time = 1;
@@ -1738,6 +1927,12 @@ void mqtt_msg_recv(int messageSize)
       mqtt_swg_pct = -1;
     else if (mqtt_swg_pct > 100)
       mqtt_swg_pct = -1;
+  }
+
+  if (strlen(setting_info.mqtt_datetime_topic) > 0 &&
+      strcasecmp(topic, setting_info.mqtt_datetime_topic) == 0) {
+      uint32_t val = ntohl(*(uint32_t *) msg);
+    setTime(val);
   }
 }
 
@@ -1826,6 +2021,9 @@ int mqtt_connect()
     }
     if (strlen(setting_info.mqtt_swg_topic) > 0) {
       mqtt_client.subscribe(setting_info.mqtt_swg_topic);
+    }
+    if (strlen(setting_info.mqtt_datetime_topic) > 0) {
+      mqtt_client.subscribe(setting_info.mqtt_datetime_topic);
     }
     set_status_msg("MQTT subscribed");
     oled_screen_refresh = 1;
@@ -1945,6 +2143,11 @@ int mqtt_is_pump_on() { return 1; }
 int mdns_loop() {}
 #endif /* WIFI_SUPPORT */
 
+void time_setup()
+{
+  setSyncInterval(15 * 60);
+}
+
 void setup()
 {
   serial_setup();
@@ -1955,6 +2158,7 @@ void setup()
 
   rotary_button_setup();
 
+  time_setup();
   wifi_setup();
   mqtt_setup();
   web_setup();

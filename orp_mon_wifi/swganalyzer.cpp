@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <TimeLib.h>
 #include "swganalyzer.h"
 
 SWGAnalyzer::SWGAnalyzer()
@@ -44,6 +45,17 @@ void SWGAnalyzer::setup(int sample_time_sec, int std_dev, int orp_target_val, in
   orp_low_bound = orp_target - orp_hysteresis - (orp_interval * 5);
   last_orp_pct = 0;
   last_orp = 0;
+
+  date_check = 0;
+  for (int i = 0; i < 7; i++) {
+    start_time[i] = 0;
+    end_time[i] = 0;
+  }
+}
+
+void SWGAnalyzer::enable_datetime_check(int enable)
+{
+  date_check = enable ? 1 : 0;
 }
 
 void SWGAnalyzer::orp_add(float val)
@@ -164,4 +176,29 @@ float SWGAnalyzer::get_last_orp()
 int SWGAnalyzer::get_last_swg_pct()
 {
   return last_orp_pct;
+}
+
+int SWGAnalyzer::is_scheduled()
+{
+  if (!date_check)
+    return 1;
+
+  int today = day();
+  if (today >= 7)
+    return 0;
+  if (start_time[today] == 0 && end_time[today] == 0)
+    return 0;
+
+  int tm_sec= hour() * 60 * 60 + minute() * 60 + second();
+  if (tm_sec >= start_time[today] && tm_sec <= end_time[today])
+    return 1;
+  return 0;
+}
+
+void SWGAnalyzer::set_schedule(int day_num, int start, int end)
+{
+  if (day_num >= 7)
+    return;
+  start_time[day_num] = start;
+  end_time[day_num] = end;
 }
