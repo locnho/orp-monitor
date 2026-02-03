@@ -2,7 +2,7 @@
 #define SWG_ANALYZER_H  1
 
 #define MAX_ORP_DATA                (15*60)
-#define SWG_ORP_STD_DEV_DEFAULT     5
+#define SWG_ORP_STD_DEV_DEFAULT     2.5
 #define SWG_ORP_DEFAULT             700
 #define SWG_ORP_HYSTERESIS_DEFAULT  10
 #define SWG_ORP_INTERVAL_DEFAULT    15
@@ -17,7 +17,7 @@
 class SWGAnalyzer {
 public:
   SWGAnalyzer();
-  void setup(int sample_time_sec, int std_dev, int orp_target_val, int orp_target_hysteresis_val, int orp_target_interval, int orp_target_guard, int orp_pct_val[5]);
+  void setup(int sample_time_sec, float std_dev, int orp_target_val, int orp_target_hysteresis_val, int orp_target_interval, int orp_target_guard, int orp_pct_val[5]);
   void orp_add(float val);
   int get_swg_pct();
 
@@ -36,7 +36,7 @@ protected:
   int max_sample;
 
   unsigned long orp_sample_time_ms;
-  int orp_std_dev;
+  float orp_std_dev;
   int orp_target;
   int orp_hysteresis;
   int orp_interval;

@@ -15,7 +15,7 @@ SWGAnalyzer::SWGAnalyzer()
         SWG_ORP_GUARD_DEFAULT, pct);
 }
 
-void SWGAnalyzer::setup(int sample_time_sec, int std_dev, int orp_target_val, int orp_target_hysteresis_val, int orp_target_interval, int orp_target_guard, int orp_pct_val[5])
+void SWGAnalyzer::setup(int sample_time_sec, float std_dev, int orp_target_val, int orp_target_hysteresis_val, int orp_target_interval, int orp_target_guard, int orp_pct_val[5])
 {
   orp_pct[0] = orp_pct_val[0];
   orp_pct[1] = orp_pct_val[1];
@@ -183,8 +183,8 @@ int SWGAnalyzer::is_scheduled()
   if (!date_check)
     return 1;
 
-  int today = day();
-  if (today >= 7)
+  int today = weekday() - 1;
+  if (today < 0 || today >= 7)
     return 0;
   if (start_time[today] == 0 && end_time[today] == 0)
     return 0;
@@ -197,7 +197,7 @@ int SWGAnalyzer::is_scheduled()
 
 void SWGAnalyzer::set_schedule(int day_num, int start, int end)
 {
-  if (day_num >= 7)
+  if (day_num < 0 || day_num >= 7)
     return;
   start_time[day_num] = start;
   end_time[day_num] = end;

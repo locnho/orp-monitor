@@ -136,7 +136,7 @@ typedef struct {
   int swg_enable;
   int swg_orp_target;
   int swg_orp_hysteresis;
-  int swg_orp_std_dev;
+  float swg_orp_std_dev;
   int swg_orp_interval;
   int swg_orp_guard;
   int swg_orp_pct[5];
@@ -943,7 +943,7 @@ void system_setting_init()
 
   setting_info.swg_enable = prefs.getInt("SWGENABLE", SWG_ENABLE_DEFAULT);
   setting_info.swg_orp_target = prefs.getInt("SWGORPTARGET", SWG_ORP_DEFAULT);
-  setting_info.swg_orp_std_dev = prefs.getInt("SWGORSTDEV", SWG_ORP_STD_DEV_DEFAULT);
+  setting_info.swg_orp_std_dev = prefs.getFloat("SWGORSTDEVF", SWG_ORP_STD_DEV_DEFAULT);
   setting_info.swg_orp_hysteresis = prefs.getInt("SWGORPHYST", SWG_ORP_HYSTERESIS_DEFAULT);
   setting_info.swg_orp_interval = prefs.getInt("SWGORPINTERVAL", SWG_ORP_INTERVAL_DEFAULT);
   setting_info.swg_orp_guard = prefs.getInt("SWGORPGUARD", SWG_ORP_GUARD_DEFAULT);
@@ -999,7 +999,7 @@ void system_setting_save()
 
   prefs.putInt("SWGENABLE", setting_info.swg_enable);
   prefs.putInt("SWGORPTARGET", setting_info.swg_orp_target);
-  prefs.putInt("SWGORSTDEV", setting_info.swg_orp_std_dev);
+  prefs.putFloat("SWGORSTDEVF", setting_info.swg_orp_std_dev);
   prefs.putInt("SWGORPHYST", setting_info.swg_orp_hysteresis);
   prefs.putInt("SWGORPINTERVAL", setting_info.swg_orp_interval);
   prefs.putInt("SWGORPGUARD", setting_info.swg_orp_guard);
@@ -1093,7 +1093,7 @@ void orp_loop()
 #if defined(WIFI_SUPPORT)
     // Publish only if pump is ON.
     if ((millis() - mqtt_orp_publish_ts) >= ORP_PUBLISH_TIMEMS) {
-      if (mqtt_is_pump_on())
+      if (mqtt_is_pump_on() && swg_anlyzer.is_scheduled()) {
         mqtt_publish(orp_reading);
       else
         mqtt_publish(0.0);
@@ -1163,7 +1163,7 @@ void orp_loop()
     oled_screen_refresh = 1;
 #if defined(WIFI_SUPPORT)
     if ((millis() - mqtt_orp_publish_ts) >= ORP_PUBLISH_TIMEMS) {
-      if (mqtt_is_pump_on())
+      if (mqtt_is_pump_on() && swg_anlyzer.is_scheduled())
         mqtt_publish(orp_reading);
       else
         mqtt_publish(0.0);
@@ -1479,7 +1479,7 @@ const char* htmlSWGHyst = R"rawliteral(
 const char* htmlSWGStdDev = R"rawliteral(
             <div class="form-group">
             <label2 for="swgstddev">SWG Std Deviation mV:</label2>
-            <input type="side" id="swgstddev" name="swgstddev" value="%d" required>
+            <input type="side" id="swgstddev" name="swgstddev" value="%.1f" required>
             </div>
 )rawliteral";
 
@@ -1537,7 +1537,7 @@ const char* htmlSWGPct4 = R"rawliteral(
 
 const char* htmlMqttDTTopic = R"rawliteral(
             <label for="dttopic">MQTT Date Topic:</label>
-            <input type="text" id="dttopic" name="dttopic" title="Set topic to 'datetime' to enable schedule. Leave blank to disable." value="%s" required>
+            <input type="text" id="dttopic" name="dttopic" title="Set topic to 'datetime' to enable schedule. Leave blank to disable. Schedule applies to MQTT ORP reporting as well" value="%s" required>
 )rawliteral";
 
 const char* htmlSchedule0 = R"rawliteral(
@@ -1819,7 +1819,7 @@ void web_handle_mqtt_submit()
   if (server.hasArg("swgstddev")) {
     receivedMessage += " ";
     receivedMessage += server.arg("swgstddev");
-    setting_info.swg_orp_std_dev = atoi(server.arg("swgstddev").c_str());
+    setting_info.swg_orp_std_dev = atof(server.arg("swgstddev").c_str());
   }
   if (server.hasArg("swginterval")) {
     receivedMessage += " ";
